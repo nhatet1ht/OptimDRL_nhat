@@ -10,6 +10,10 @@
 > là nguồn dữ liệu gốc, chi tiết hơn, dùng để tra cứu số liệu chính xác. File này là bản
 > **tổng hợp học tập**, sắp xếp lại theo trình tự sư phạm (lý thuyết trước, ứng dụng sau,
 > hành trình suy luận xuyên suốt) thay vì trình tự thời gian viết báo cáo.
+>
+> Xem thêm **[`PIPELINES.md`](./PIPELINES.md)** — sơ đồ trực quan (Mermaid, tự render trên
+> GitHub) cho data/training/evaluation pipeline, state machine HO/RLF/PP, và vòng lặp
+> phương pháp luận của 11 thí nghiệm.
 
 ---
 
