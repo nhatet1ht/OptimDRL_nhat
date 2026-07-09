@@ -1,0 +1,1075 @@
+% Compile with: xelatex RESULTS_AND_ANALYSIS.tex  (run twice for TOC)
+\documentclass[11pt]{article}
+
+\usepackage{fontspec}
+\setmainfont{Times New Roman}
+\setmonofont{Consolas}[Scale=0.88]
+
+\usepackage[strings]{underscore}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{array}
+\usepackage{hyperref}
+\hypersetup{colorlinks=true,linkcolor=blue,urlcolor=blue,citecolor=blue}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{enumitem}
+\usepackage{parskip}
+
+\lstset{
+  basicstyle=\ttfamily\small,
+  breaklines=true,
+  columns=fullflexible,
+  frame=single,
+  backgroundcolor=\color{black!3},
+  showstringspaces=false,
+  keepspaces=true
+}
+
+\newcommand{\ok}{\checkmark}
+\newcommand{\fail}{$\times$}
+
+\title{\textbf{Kết quả thử nghiệm và Phân tích nguyên nhân\\Tái hiện bài báo DRL-based Adaptive Handover Protocols}}
+\author{}
+\date{Cập nhật: 2026-07-02}
+
+\begin{document}
+\maketitle
+
+\begin{quote}
+\textbf{Paper:} \textit{A Deep Reinforcement Learning-Based Approach for Adaptive Handover Protocols}\\
+\textbf{Authors:} Johannes Voigt, Peter J. Gu, Peter M. Rost --- KIT / TUM\\
+\textbf{Venue:} SCC 2025\\
+\textbf{Repo gốc:} \url{https://github.com/kit-cel/HandoverOptimDRL}\\
+\textbf{Môi trường thực nghiệm:} RTX 3060 Ti (8GB) $\cdot$ CUDA 12.8 $\cdot$ PyTorch 2.7.0+cu126 $\cdot$ Python 3.12 $\cdot$ uv\\
+\textbf{Phạm vi tài liệu này:} Chỉ trình bày kết quả thử nghiệm và phân tích nguyên nhân (không bao gồm phần giới thiệu lý thuyết nền, formulation bài toán, hay kiến trúc PPO --- xem \texttt{COMPREHENSIVE\_REPORT.pdf} cho bản đầy đủ).\\
+\textbf{Cập nhật:} 2026-07-02
+\end{quote}
+
+\tableofcontents
+\newpage
+
+\section{Kết quả baseline (tái hiện thành công)}
+
+\subsection{3GPP Baseline}
+
+\begin{longtable}{@{}cccc@{}}
+\toprule
+\textbf{Speed (km/h)} & \boldmath{$\Gamma_R$ (\%)} & \textbf{PP rate (\%)} & \textbf{RLF rate (\%)} \\
+\midrule
+\endhead
+30 & 99.756 & 41.83 & 3.37 \\
+50 & 99.751 & 50.00 & 2.05 \\
+70 & 99.797 & 47.26 & 2.53 \\
+90 & 99.696 & 44.41 & 6.99 \\
+\bottomrule
+\end{longtable}
+
+\textbf{Nhận xét:} PP rate 42--50\% --- cứ 2 lần HO thì 1 lần ping-pong. 3GPP không thích nghi với tốc độ di chuyển của UE.
+
+\subsection{PPO gốc (pre-trained model của paper)}
+
+\begin{longtable}{@{}cccc@{}}
+\toprule
+\textbf{Speed (km/h)} & \boldmath{$\Gamma_R$ (\%)} & \textbf{PP rate (\%)} & \textbf{RLF rate (\%)} \\
+\midrule
+\endhead
+30 & 99.795 & 43.58 & 1.17 \\
+50 & 99.823 & 45.38 & 0.70 \\
+70 & 99.839 & 46.45 & 2.84 \\
+90 & 99.763 & 47.53 & 4.63 \\
+\bottomrule
+\end{longtable}
+
+\textbf{Sai số so với paper (Fig. 4):} $< 0.02\%$ $\rightarrow$ \textbf{Tái hiện evaluation thành công.}
+
+\textbf{Policy của pre-trained model:} Hoàn toàn deterministic (entropy $H = 0$):
+\begin{lstlisting}
+best_BS=3 -> action=3, probs=[0., 0., 0., 1., 0.]
+best_BS=1 -> action=1, probs=[0., 1., 0., 0., 0.]
+best_BS=0 -> action=0, probs=[1., 0., 0., 0., 0.]
+\end{lstlisting}
+
+\subsection{So sánh với paper}
+
+\begin{longtable}{@{}lcc@{}}
+\toprule
+\textbf{Method} & \boldmath{$\Gamma_R$} \textbf{trung bình (\%)} & \textbf{Match} \\
+\midrule
+\endhead
+Paper --- 3GPP & \textasciitilde 99.75 & Đạt \\
+Tái hiện --- 3GPP & 99.750 & Đạt \\
+Paper --- PPO & \textasciitilde 99.82 & Đạt \\
+Tái hiện --- PPO gốc & 99.805 & Đạt \\
+\bottomrule
+\end{longtable}
+
+\section{Vấn đề cốt lõi: Credit Assignment Problem}
+
+Đây là nguyên nhân gốc rễ khiến \textbf{tất cả 11 lần training thất bại}.
+
+\subsection{Tại sao policy bị stuck ở uniform distribution?}
+
+Với \textbf{uniform random policy} (mỗi BS được chọn với xác suất $1/N = 0.2$):
+\[
+P(\text{HO hoàn thành trong 1 lần}) = P(\text{5 bước liên tiếp cùng BS}) = \left(\frac{1}{5}\right)^4 = 0.16\%
+\]
+
+\textbf{Chuỗi hậu quả:}
+
+\begin{lstlisting}
+Uniform policy
+    |
+    v  0.16%/step HO trigger
+P(HO) cuc thap -> UE luon o cung pcell
+    |
+    v
+Reward = sinr_norm[pcell] ~ 0.5 (khong doi)
+    |
+    v  Khong phu thuoc action
+Advantage A(s, a) ~ 0 cho moi (s, a)
+    |
+    v
+Policy gradient ~ 0 -> Policy khong update
+    |
+    v
+Stuck o uniform distribution mai mai
+\end{lstlisting}
+
+\textbf{Xác nhận thực nghiệm} (300K steps, thử 3 giá trị \texttt{ent\_coef}):
+
+\begin{longtable}{@{}ccc@{}}
+\toprule
+\textbf{ent\_coef} & \textbf{Entropy cuối} & \textbf{\% of max (1.6094)} \\
+\midrule
+\endhead
+0.1 & 1.6094 & \textbf{100.0\%} --- hoàn toàn uniform \\
+0.01 & 1.6093 & 99.99\% \\
+0.001 & 1.6084 & 99.9\% \\
+\bottomrule
+\end{longtable}
+
+$\rightarrow$ Giảm entropy coefficient \textbf{không giúp được gì}. Vấn đề là gradient từ policy objective, không phải từ entropy regularization.
+
+\subsection{Ước tính tín hiệu gradient trong 5M steps}
+
+\begin{longtable}{@{}lcc@{}}
+\toprule
+\textbf{Metric} & \textbf{Tính toán} & \textbf{Giá trị ước tính} \\
+\midrule
+\endhead
+Số episodes (ep\_len $\approx$ 291) & $5M / 291$ & \textasciitilde 17{,}180 episodes \\
+HOs/episode (uniform) & $291 \times 0.0016 / 9$ & \textasciitilde 0.05 HO/episode \\
+Tổng HO completions & $17{,}180 \times 0.05$ & \textasciitilde 860 HOs \\
+HOs / rollout buffer (2000) & $860 / 2500$ & \textbf{\textasciitilde 0.34 HO/buffer} \\
+\bottomrule
+\end{longtable}
+
+$\rightarrow$ Chỉ \textasciitilde 860 HO completions trong \textbf{toàn bộ 5M steps} để học từ --- tín hiệu quá thưa thớt.
+
+\subsection{Tại sao pre-trained model của paper lại hoạt động?}
+
+Model gốc có kết quả hoàn toàn deterministic (H=0), ngụ ý nó \textbf{đã hội tụ hoàn toàn}. Các giả thuyết:
+
+\begin{enumerate}
+  \item \textbf{Random seed may mắn}: Initialization tình cờ tạo ra slight bias về một BS $\rightarrow$ positive feedback loop $\rightarrow$ hội tụ. Giả thuyết bị bác bỏ một phần khi thử 5 seeds đều thất bại.
+  \item \textbf{Train nhiều hơn 5M steps}: Paper không document rõ số steps thực tế.
+  \item \textbf{SINR reward ở cell edge}: Khi UE ở cell edge, SINR thấp $\rightarrow$ RLF penalty $-2C$ $\rightarrow$ agent học cách tránh bằng cách commit cùng BS $\rightarrow$ HO xảy ra $\rightarrow$ gradient xuất hiện. Mechanism này có thể chỉ hoạt động với một số trajectory cụ thể.
+\end{enumerate}
+
+\subsection{Thách thức 9-timestep delay}
+
+Để HO thành công với t\_ho\_prep=5 + t\_ho\_exec=4, policy phải \textbf{dự đoán BS tốt nhất sau 9 bước tương lai}:
+\[
+\hat{a}_t = \arg\max_i \text{SINR}_{i,t+9}
+\]
+
+Nhưng observation tại $t$ chỉ có SINR tại thời điểm $t$. MLP thuần túy không có khả năng look-ahead này, dẫn đến việc commit HO sai BS $\rightarrow$ target BS thay đổi trong khi HO đang thực hiện $\rightarrow$ RLF.
+
+\section{Thử nghiệm V1 --- Training từ scratch}
+
+\subsection{Thử nghiệm 1A: t\_ho\_prep=3 trong Phase 1}
+
+\textbf{Ý tưởng:} Giảm t\_ho\_prep từ 5 xuống 3 để tăng $P(\text{HO})$:
+\[
+P(\text{HO} \mid t_{ho\_prep}=3) = (1/5)^2 = 4\% \quad \text{(tăng 25\texttimes\ so với 0.16\%)}
+\]
+
+\textbf{Config:}
+\begin{lstlisting}
+Phase 1: t_ho_prep=3, terminate_on_pp=False, terminate_on_rlf=True -> 2.5M steps
+Phase 2: t_ho_prep=5, terminate_on_pp=True,  terminate_on_rlf=True -> 2.5M steps
+\end{lstlisting}
+
+\textbf{Kết quả training:} entropy\_loss $= -1.61$ (uniform) xuyên suốt
+
+\textbf{Kết quả eval:}
+
+\begin{longtable}{@{}cccc@{}}
+\toprule
+\textbf{Speed (km/h)} & \boldmath{$\Gamma_R$ (\%)} & \textbf{PP rate (\%)} & \textbf{RLF rate (\%)} \\
+\midrule
+\endhead
+30 & \textasciitilde 22 & \textasciitilde 0 & \textasciitilde 193 \\
+50 & \textasciitilde 10 & \textasciitilde 0 & \textasciitilde 186 \\
+70 & \textasciitilde 17 & \textasciitilde 5 & \textasciitilde 205 \\
+90 & \textasciitilde 29 & \textasciitilde 0 & \textasciitilde 196 \\
+\bottomrule
+\end{longtable}
+
+\textbf{Phân tích thất bại:} Với t\_ho\_prep=3, HO xảy ra nhiều hơn nhưng đến BS \textbf{ngẫu nhiên} (không phải best BS) $\rightarrow$ SINR thấp $\rightarrow$ HOF $\rightarrow$ RLF. Reward quá noisy, gradient không đủ để thoát uniform.
+
+\subsection{Thử nghiệm 1B: 2-phase đúng paper (t\_ho\_prep=5 xuyên suốt)}
+
+\textbf{Config:}
+\begin{lstlisting}
+Phase 1: t_ho_prep=5, terminate_on_pp=False, terminate_on_rlf=True -> 2.5M steps
+Phase 2: t_ho_prep=5, terminate_on_pp=True,  terminate_on_rlf=True -> 2.5M steps
+         lr_schedule = constant 1e-5, reset_num_timesteps=True
+\end{lstlisting}
+
+\textbf{Kết quả training:}
+\begin{lstlisting}
+entropy_loss = -1.61 xuyen suot TOAN BO 5M steps (ca 2 phase)
+Action probs: [0.199, 0.199, 0.202, 0.203, 0.197]  <- UNIFORM
+\end{lstlisting}
+
+\textbf{Root cause:} ep\_len\_mean = 291 $\rightarrow$ RLF vẫn là nguyên nhân chính terminate episodes ngắn $\rightarrow$ gradient signal vẫn quá yếu. Phase 1 (no PP) không giúp vì RLF vẫn truncate.
+
+\section{Thử nghiệm V2 --- 4 phương án giải quyết}
+
+Sau khi xác định root cause là credit assignment problem, 4 phương án được thử đồng thời.
+
+\subsection{Phương án Curriculum t\_ho\_prep = 1 $\to$ 3 $\to$ 5}
+
+\textbf{Script:} \texttt{scripts/train\_ppo\_curriculum.py}
+
+\textbf{Ý tưởng:} Phase 0 với t\_ho\_prep=1 biến bài toán thành \textbf{multi-armed bandit} đơn giản:
+\[
+P(\text{HO trigger/step} \mid t_{ho\_prep}=1) = 80\% \quad \text{(immediate reward)}
+\]
+
+\textbf{Config:}
+
+\begin{longtable}{@{}cccccc@{}}
+\toprule
+\textbf{Phase} & \textbf{t\_ho\_prep} & \textbf{t\_ho\_exec} & \textbf{terminate\_rlf} & \textbf{terminate\_pp} & \textbf{Steps} \\
+\midrule
+\endhead
+0 & \textbf{1} (10ms) & \textbf{1} (10ms) & False & False & 1M \\
+1 & 3 (30ms) & 2 (20ms) & True & False & 2M \\
+2 & 5 (50ms) & 4 (40ms) & True & True & 2M \\
+\bottomrule
+\end{longtable}
+
+\textbf{Kết quả training Phase 0 --- đột phá đầu tiên:}
+\begin{lstlisting}
+40K steps:  entropy = -1.29 (so voi -1.61 stuck truoc day!)
+Phase 0:    entropy: -1.61 -> -1.07
+            ep_rew:  -1290 -> -232 -> +62 -> +335 -> +495 -> +3660
+\end{lstlisting}
+
+\textbf{Đây là lần đầu tiên entropy thực sự giảm} --- policy đang học!
+
+\textbf{Kết quả training Phase 1:} entropy: $-1.07 \to -1.58$ (REGRESSION)
+
+\textbf{Kết quả training Phase 2:} entropy: $-1.58 \to -1.61$ (về lại UNIFORM)
+
+\textbf{Kết quả eval (t\_ho\_prep=5 --- paper params):}
+
+\begin{longtable}{@{}cccc@{}}
+\toprule
+\textbf{Speed (km/h)} & \boldmath{$\Gamma_R$ (\%)} & \textbf{PP rate (\%)} & \textbf{RLF rate (\%)} \\
+\midrule
+\endhead
+30 & 29.5 & 97.1 & 68.2 \\
+50 & 12.6 & 95.7 & 64.5 \\
+70 & 23.7 & 95.9 & 63.6 \\
+90 & 25.3 & 95.7 & 68.9 \\
+\bottomrule
+\end{longtable}
+
+\textbf{Phân tích thất bại:} Phase 0 thành công nhưng mỗi khi t\_ho\_prep tăng lên, credit assignment problem xuất hiện lại. Policy không thể "giữ được" gì từ phase trước khi reward signal biến mất.
+
+\subsection{Phương án Reward Shaping}
+
+\textbf{Script:} \texttt{scripts/train\_ppo\_reward\_shaped.py}
+
+\textbf{Ý tưởng:} Thêm immediate reward dựa trên action chọn:
+\[
+r_{shaped} = \alpha \cdot s_{SINR}[a_t], \quad \alpha = 0.1
+\]
+
+Khi agent chọn best BS: $r_{shaped} \approx 0.1 \times 1.0 = 0.1$
+Khi agent chọn worst BS: $r_{shaped} \approx 0.1 \times 0.0 = 0.0$
+
+\textbf{Kết quả eval:}
+
+\begin{longtable}{@{}cccc@{}}
+\toprule
+\textbf{Speed (km/h)} & \boldmath{$\Gamma_R$ (\%)} & \textbf{PP rate (\%)} & \textbf{RLF rate (\%)} \\
+\midrule
+\endhead
+30 & 36.5 & 25.0 & 40.0 \\
+50 & 22.7 & 41.3 & 173.9 \\
+70 & 23.8 & 34.7 & 124.5 \\
+90 & 17.8 & 26.3 & 122.8 \\
+\bottomrule
+\end{longtable}
+
+\textbf{Phân tích thất bại:} $\alpha = 0.1$ quá nhỏ để break uniform distribution. Gradient từ SINR reward (không phụ thuộc action) vẫn dominant. Entropy vẫn stuck $-1.61$.
+
+\subsection{Phương án Imitation Learning (BC + PPO)}
+
+\textbf{Script:} \texttt{scripts/train\_ppo\_imitation.py}
+
+\textbf{Thiết kế hai giai đoạn:}
+
+\textbf{Stage 1 --- Behavioral Cloning:}
+\begin{lstlisting}[language=Python]
+oracle_action = argmax(sinr_norm)  # luon chon BS co SINR cao nhat
+dataset: 348,400 samples tu 57 datasets training
+Training: 20 epochs, batch_size=512, lr=3e-4
+\end{lstlisting}
+
+Kết quả BC:
+\begin{lstlisting}
+Epoch 1:  loss=0.2061, acc=98.9%
+Epoch 2:  loss=0.0004, acc=100.0%
+Epoch 3+: loss~0.0000, acc=100.0%  (hoan toan deterministic sau 2 epochs!)
+\end{lstlisting}
+
+\textbf{Stage 2 --- PPO Fine-tuning:}
+\begin{lstlisting}
+ent_coef = 0.01 (giam de preserve BC structure)
+Phase 1: 2.5M steps, terminate_on_pp=False
+Phase 2: 2.5M steps, terminate_on_pp=True
+\end{lstlisting}
+
+\textbf{Kết quả eval:}
+
+\begin{longtable}{@{}cccc@{}}
+\toprule
+\textbf{Speed (km/h)} & \boldmath{$\Gamma_R$ (\%)} & \textbf{PP rate (\%)} & \textbf{RLF rate (\%)} \\
+\midrule
+\endhead
+30 & 38.8 & \textbf{0.0} & \textbf{0.0} \\
+50 & 41.3 & \textbf{0.0} & \textbf{0.0} \\
+70 & 50.0 & \textbf{0.0} & \textbf{0.0} \\
+90 & 44.3 & \textbf{0.0} & \textbf{0.0} \\
+\bottomrule
+\end{longtable}
+
+\textbf{Phân tích:} PP=0\%, RLF=0\% $\rightarrow$ tốt về phụ, nhưng $\Gamma_R = 38\text{--}50\%$ $\rightarrow$ \textbf{"Never HO" policy}. UE kẹt ở BS ban đầu không theo kịp channel thay đổi. Nguyên nhân: PPO Phase 2 với \texttt{terminate\_on\_pp=True} $\rightarrow$ mọi HO đều có rủi ro PP penalty $\rightarrow$ agent học "tránh HO hoàn toàn".
+
+\textbf{Điểm tích cực:} BC hoạt động hoàn hảo, ent\_coef=0.01 preserve structure deterministic.
+
+\subsection{Phương án Multiple Seeds}
+
+\textbf{Script:} \texttt{scripts/train\_ppo\_multiseed.py}
+
+\textbf{Ý tưởng:} Paper có thể đã dùng lucky seed.
+
+\textbf{Seeds thử:} $[0, 42, 123, 777, 1234] \times 2M$ steps
+
+\textbf{Kết quả:}
+\begin{lstlisting}
+Seed     0: entropy = 1.6093  (uniform)
+Seed    42: entropy = 1.6094  (uniform)
+Seed   123: entropy = 1.6094  (uniform)
+Seed   777: entropy = 1.6093  (uniform)
+Seed  1234: entropy = 1.6090  (uniform, "best" -- van uniform)
+\end{lstlisting}
+
+\textbf{Kết luận:} Credit assignment problem là \textbf{systematic}, không phải do seed. Với 2M steps standard 2-phase training, tất cả seeds đều stuck uniform.
+
+\subsection{Tổng hợp V2}
+
+\begin{longtable}{@{}lcccl@{}}
+\toprule
+\textbf{Model} & \boldmath{$\Gamma_R$} \textbf{TB (\%)} & \textbf{PP TB (\%)} & \textbf{RLF TB (\%)} & \textbf{Trạng thái} \\
+\midrule
+\endhead
+Paper PPO (original) & \textbf{99.8} & 45.7 & 2.3 & TARGET \\
+3GPP baseline & 99.75 & 45.9 & 3.7 & Reference \\
+PPO 2-phase (paper) & 19.6 & 1.1 & 195.0 & Uniform \\
+Curriculum $1\to3\to5$ & 22.8 & \textbf{96.1} & 66.3 & PP=97\% \\
+Reward shaping $\alpha=0.1$ & 25.2 & 31.8 & 115.0 & Uniform \\
+Imitation (BC+PPO) & 43.6 & \textbf{0.0} & \textbf{0.0} & Never HO \\
+Multiseed (5 seeds) & 20.7 & 49.4 & 93.2 & Uniform \\
+\bottomrule
+\end{longtable}
+
+\section{Thử nghiệm V3 --- BC + Gradual Curriculum}
+
+\textbf{Script:} \texttt{scripts/train\_ppo\_bc\_curriculum.py}
+
+\textbf{Thiết kế:} Kết hợp ưu điểm của BC (initialization tốt) và Curriculum (transition mượt):
+
+\begin{lstlisting}
+BC init (oracle: argmax sinr_norm, 30 epochs) -> policy deterministic
+-> Phase 0: prep=1, exec=1, no-RLF, no-PP   -> 1M steps  (warm up)
+-> Phase 1: prep=2, exec=1, RLF, no-PP      -> 1M steps
+-> Phase 2: prep=3, exec=2, RLF, no-PP      -> 1M steps
+-> Phase 3: prep=4, exec=3, RLF, PP         -> 1M steps  (PP introduced)
+-> Phase 4: prep=5, exec=4, RLF, PP         -> 1M steps  (paper params)
+Total: 5M PPO steps
+\end{lstlisting}
+
+\textbf{Key design choices:}
+\begin{itemize}
+  \item \texttt{ent\_coef=0.01} --- preserve BC structure
+  \item \texttt{t\_ho\_exec} giảm dần từ $1\to4$: ít disconnection time ở đầu $\rightarrow$ ít HOF
+  \item PP chỉ từ Phase 3: học HO trước, học tránh PP sau
+  \item lr giảm dần: $3e{-}5 \to 2e{-}5 \to 1.5e{-}5 \to 1e{-}5 \to 5e{-}6$
+\end{itemize}
+
+\textbf{Root cause phát hiện trong V3:} \texttt{ent\_coef=0.01} quá thấp $\rightarrow$ entropy collapse nhanh $\rightarrow$ policy stuck "never HO". Paper dùng \texttt{ent\_coef=0.1} (cao hơn 10 lần).
+
+\textbf{Kết quả eval BC+Curriculum Phase 0} (t\_ho\_prep=1, ent\_coef=0.01):
+
+\begin{longtable}{@{}cccc@{}}
+\toprule
+\textbf{Speed (km/h)} & \boldmath{$\Gamma_R$ (\%)} & \textbf{PP rate (\%)} & \textbf{RLF rate (\%)} \\
+\midrule
+\endhead
+30 & 38.8 & 0.0 & 0.0 \\
+50 & 41.3 & 0.0 & 0.0 \\
+70 & 50.0 & 0.0 & 0.0 \\
+90 & 44.3 & 0.0 & 0.0 \\
+\bottomrule
+\end{longtable}
+
+\textbf{Kết quả eval BC+Curriculum Final} (t\_ho\_prep=5, paper params):
+
+\begin{longtable}{@{}cccc@{}}
+\toprule
+\textbf{Speed (km/h)} & \boldmath{$\Gamma_R$ (\%)} & \textbf{PP rate (\%)} & \textbf{RLF rate (\%)} \\
+\midrule
+\endhead
+30 & 31.3 & 0.0 & 225.0 \\
+50 & 37.4 & 0.0 & 294.7 \\
+70 & 25.8 & 0.0 & 235.0 \\
+90 & 21.1 & 0.0 & 239.1 \\
+\bottomrule
+\end{longtable}
+
+\textbf{Nhận xét:} Phase 0 $\to$ "Never HO". Final $\to$ "HO badly" (RLF=225--295\%). Entropy collapse quá sớm với ent\_coef=0.01 là nguyên nhân.
+
+\section{Thử nghiệm V4 --- Biến thể BC+Curriculum}
+
+\textbf{Cải tiến chính:} \texttt{ent\_coef=0.1} (giá trị paper), \texttt{SubprocVecEnv n\_envs=4}, GPU
+
+\subsection{bc\_paper --- BC + paper params trực tiếp}
+
+\textbf{Script:} \texttt{scripts/train\_ppo\_bc\_paper.py}
+\textbf{Hypothesis:} BC giải quyết cold-start problem, paper params đủ tốt từ đó.
+
+\textbf{Kết quả eval:}
+
+\begin{longtable}{@{}cccc@{}}
+\toprule
+\textbf{Speed (km/h)} & \boldmath{$\Gamma_R$ (\%)} & \textbf{PP rate (\%)} & \textbf{RLF rate (\%)} \\
+\midrule
+\endhead
+30 & 24.1 & 0.0 & \textbf{250.0} \\
+50 & 33.2 & 0.0 & \textbf{490.0} \\
+70 & 31.1 & 0.0 & \textbf{325.0} \\
+90 & 30.6 & 0.0 & \textbf{361.5} \\
+\bottomrule
+\end{longtable}
+
+\textbf{Pattern:} "HO badly" --- cố HO nhưng thất bại liên tục. Target BS thay đổi trong 9 timesteps $\rightarrow$ RLF.
+
+\subsection{bc\_highent --- BC + Curriculum + ent\_coef=0.1}
+
+\textbf{Script:} \texttt{scripts/train\_ppo\_bc\_highent.py}
+\textbf{Khác V3:} \texttt{ent\_coef=0.1} thay vì 0.01
+
+\textbf{Kết quả eval:}
+
+\begin{longtable}{@{}cccc@{}}
+\toprule
+\textbf{Speed (km/h)} & \boldmath{$\Gamma_R$ (\%)} & \textbf{PP rate (\%)} & \textbf{RLF rate (\%)} \\
+\midrule
+\endhead
+30 & 9.1 & 0.0 & 225.0 \\
+50 & 21.8 & 14.3 & 285.7 \\
+70 & 26.6 & 23.8 & 228.6 \\
+90 & 27.9 & 5.3 & 278.9 \\
+\bottomrule
+\end{longtable}
+
+\textbf{Nhận xét:} $\Gamma_R$ thấp nhất trong V4. Entropy cao hơn $\rightarrow$ explore nhiều HO hơn $\rightarrow$ nhiều RLF hơn. Có PP=14--24\% ở 50--70 km/h.
+
+\subsection{bc\_noterm --- BC + Curriculum + không terminate}
+
+\textbf{Script:} \texttt{scripts/train\_ppo\_bc\_noterm.py}
+\textbf{Khác biệt:} \texttt{terminate\_on\_rlf=False, terminate\_on\_pp=False} xuyên suốt (chỉ dùng reward penalty)
+
+\textbf{Rationale:} Không terminate $\rightarrow$ policy học từ hậu quả thay vì bị reset
+
+\textbf{Kết quả eval:}
+
+\begin{longtable}{@{}cccc@{}}
+\toprule
+\textbf{Speed (km/h)} & \boldmath{$\Gamma_R$ (\%)} & \textbf{PP rate (\%)} & \textbf{RLF rate (\%)} \\
+\midrule
+\endhead
+30 & 38.8 & 0.0 & 0.0 \\
+50 & 41.3 & 0.0 & 0.0 \\
+70 & \textbf{50.0} & 0.0 & 0.0 \\
+90 & 44.3 & 0.0 & 0.0 \\
+\bottomrule
+\end{longtable}
+
+\textbf{Pattern:} Giống hệt Imitation V2 --- "Never HO". Policy học "không HO còn an toàn hơn" dù không bị terminate vì HO cost (disconnection) vẫn âm.
+
+\subsection{bc\_2m --- BC + Curriculum + 2M steps/phase}
+
+\textbf{Script:} \texttt{scripts/train\_ppo\_bc\_2m.py}
+\textbf{Khác biệt:} 2M steps/phase (10M tổng), \texttt{ent\_coef=0.1}
+
+\textbf{Kết quả eval:}
+
+\begin{longtable}{@{}cccc@{}}
+\toprule
+\textbf{Speed (km/h)} & \boldmath{$\Gamma_R$ (\%)} & \textbf{PP rate (\%)} & \textbf{RLF rate (\%)} \\
+\midrule
+\endhead
+30 & 22.9 & 0.0 & 250.0 \\
+50 & 35.1 & 0.0 & 490.0 \\
+70 & 31.1 & 0.0 & 350.0 \\
+90 & 30.6 & 0.0 & 361.5 \\
+\bottomrule
+\end{longtable}
+
+\textbf{Nhận xét:} Pattern giống hệt bc\_paper (cùng RLF=250--490\%). Thêm steps không giúp được --- cùng fundamental problem.
+
+\subsection{Tổng hợp V4}
+
+\begin{longtable}{@{}lcccl@{}}
+\toprule
+\textbf{Model} & \boldmath{$\Gamma_R$} \textbf{TB (\%)} & \textbf{PP TB (\%)} & \textbf{RLF TB (\%)} & \textbf{Pattern} \\
+\midrule
+\endhead
+bc\_paper & 29.8 & 0 & 357 & HO badly \\
+bc\_highent & 21.4 & 10.9 & 254 & HO badly + PP \\
+bc\_noterm & \textbf{43.5} & 0 & 0 & Never HO \\
+bc\_2m & 29.9 & 0 & 363 & HO badly \\
+\bottomrule
+\end{longtable}
+
+\section{So sánh tổng hợp tất cả phương án}
+
+\begin{longtable}{@{}clcccl@{}}
+\toprule
+\textbf{\#} & \textbf{Method} & \boldmath{$\Gamma_R$} \textbf{TB (\%)} & \textbf{PP TB (\%)} & \textbf{RLF TB (\%)} & \textbf{Trạng thái} \\
+\midrule
+\endhead
+0 & \textbf{Paper PPO (original)} & \textbf{99.81} & 45.7 & 2.3 & TARGET \\
+0 & 3GPP baseline & 99.75 & 45.9 & 3.7 & Reference \\
+1 & PPO 2-phase (paper params) & 19.6 & 1.1 & 195.0 & Uniform \\
+2 & PPO t\_ho\_prep=3 Phase 1 & \textasciitilde 22 & \textasciitilde 0 & \textasciitilde 195 & Uniform \\
+3 & Curriculum $1\to3\to5$ & 22.8 & 96.1 & 66.3 & PP=97\% \\
+4 & Reward shaping $\alpha=0.1$ & 25.2 & 31.8 & 115.0 & Uniform \\
+5 & \textbf{Imitation (BC+PPO)} & \textbf{43.6} & \textbf{0.0} & \textbf{0.0} & Never HO \\
+6 & Multiseed (5 seeds $\times$ 2M) & 20.7 & 49.4 & 93.2 & Uniform \\
+7 & BC+Curriculum ent=0.01 & 28.9 & 0.0 & 248.5 & HO badly \\
+8 & bc\_paper (BC+paper params) & 29.8 & 0.0 & 356.6 & HO badly \\
+9 & bc\_highent (BC+ent=0.1) & 21.4 & 10.9 & 254.6 & HO badly \\
+10 & \textbf{bc\_noterm (BC+no-term)} & \textbf{43.5} & \textbf{0.0} & \textbf{0.0} & Never HO \\
+11 & bc\_2m (BC+2M steps) & 29.9 & 0.0 & 362.9 & HO badly \\
+\bottomrule
+\end{longtable}
+
+\textbf{Kết quả cao nhất của các phương án từ scratch: $\Gamma_R = 43.6\%$ --- so với target 99.81\%}
+
+\section{Phân tích pattern thất bại}
+
+\subsection{Hai trạng thái policy học được}
+
+Sau 11 lần thử, chỉ có \textbf{hai trạng thái ổn định} mà policy hội tụ vào:
+
+\begin{lstlisting}
+                    POLICY STATE SPACE
+
+  +-------------------+       +-----------------------+
+  |    "Never HO"     |       |     "HO Badly"        |
+  |                   |       |                       |
+  |  G_R = 38-50%     |       |  G_R = 22-35%         |
+  |  PP  = 0%         |       |  PP  = 0-11%          |
+  |  RLF = 0%         |       |  RLF = 250-490%       |
+  |                   |       |                       |
+  |  Xuat hien khi:   |       |  Xuat hien khi:       |
+  |  - terminate PP   |       |  - ent_coef cao       |
+  |  - no-term + BC   |       |  - t_ho_prep lon      |
+  |                   |       |  - reward HO > cost   |
+  +-------------------+       +-----------------------+
+
+              TARGET: G_R = 99.8%
+                 (chi pre-trained model dat duoc)
+\end{lstlisting}
+
+\subsection{Nguyên nhân "Never HO"}
+
+\begin{itemize}
+  \item Khi \texttt{terminate\_on\_pp=True}: mọi HO đều có rủi ro PP penalty $\rightarrow$ agent học "tránh HO hoàn toàn" để tránh rủi ro
+  \item Khi BC init + penalty-only (no terminate): HO có cost tức thì (disconnection) nhưng reward dài hạn khó học $\rightarrow$ agent an toàn ở "Never HO"
+\end{itemize}
+
+\subsection{Nguyên nhân "HO Badly"}
+
+Với 9-timestep delay (5 prep + 4 exec):
+
+\begin{lstlisting}
+t=0: Agent commit HO sang BS_i vi BS_i co SINR cao nhat
+t=9: HO execution xong, UE ket noi BS_i
+     Nhung UE da di chuyen! BS_i khong con la best BS
+     SINR[BS_i, t=9] < Q_in -> HOF -> RLF
+\end{lstlisting}
+
+\textbf{Tần suất RLF=490\%} có nghĩa là UE cứ mỗi 1 HO thành công thì có thêm 4.9 lần RLF. Điều này cực kỳ tệ.
+
+\subsection{Tại sao pre-trained model thoát được hai bẫy này?}
+
+Phân tích behavior của pre-trained model:
+\begin{itemize}
+  \item \textbf{Deterministic} (H=0): policy không bao giờ "không chắc" --- luôn chọn cùng một BS với xác suất 1.0
+  \item Điều này ngụ ý model có thể \textbf{dự đoán được BS tốt nhất trong tương lai} từ pattern SINR
+  \item Khả năng: model đã học được \textbf{implicit look-ahead} từ gradient signal --- nhưng signal này chỉ xuất hiện được nếu HO xảy ra đủ nhiều để tạo ra learning signal ban đầu
+\end{itemize}
+
+\section{Các vấn đề trong source code gốc}
+
+Phần này phân tích trực tiếp từ source code, không dựa vào ghi chú. Mỗi vấn đề được dẫn đến file và dòng cụ thể.
+
+\subsection{Bug nghiêm trọng: BS0 không bao giờ nhận reward}
+
+\textbf{File:} \texttt{src/ho\_optim\_drl/gym\_env/ho\_env\_ppo.py}, dòng 359
+
+\begin{lstlisting}[language=Python]
+# Code goc -- SAI
+def _get_reward(self) -> float:
+    ...
+    if self.s_pcell[-1] > 0:         # <- dieu kien sai
+        reward += sinr_norm[self.s_pcell[-1]].item()
+        if self.s_pcell[-1] == best_bs:
+            reward += self.config.rew_const
+\end{lstlisting}
+
+\textbf{Phân tích chi tiết:}
+
+\texttt{self.s\_pcell[-1]} là index của BS đang serve (pcell). BS0 có index = 0.
+
+Điều kiện \texttt{0 > 0} $\to$ \texttt{False} $\to$ \textbf{BS0 không bao giờ nhận SINR reward}.
+
+Cụ thể, khi pcell = BS0:
+\begin{itemize}
+  \item Không nhận \texttt{sinr\_norm[0]} (SINR reward)
+  \item Không nhận $+C$ bonus dù BS0 là best BS
+  \item Reward = 0 thay vì \texttt{sinr\_norm[0] + 0.95}
+\end{itemize}
+
+\textbf{Điều kiện đúng phải là:} \texttt{if self.s\_pcell[-1] >= 0:}
+
+\textbf{Ảnh hưởng thực tế trong training:}
+
+Tưởng như nghiêm trọng nhưng tác động bị giảm thiểu bởi một cơ chế ngẫu nhiên: mỗi episode, \texttt{pcell} ban đầu được chọn là \texttt{np.argmax(rsrp)} tại bước đầu của dataset. Vì training dùng nhiều datasets (30 km/h và 50 km/h), vị trí UE khởi đầu khác nhau nên tần suất BS0 là pcell không quá cao.
+
+Tuy nhiên, trong evaluation, bias này vẫn tồn tại có hệ thống: mọi timestep UE kết nối BS0 đều không có reward $\rightarrow$ agent bị khuyến khích \textbf{rời BS0 sớm hơn cần thiết}, kể cả khi BS0 đang có SINR tốt.
+
+\subsection{Bug nghiêm trọng: Model được save TRƯỚC khi train, và mặc định KHÔNG save}
+
+\textbf{File:} \texttt{scripts/train\_ppo.py}, dòng 20 và 141--144
+
+\begin{lstlisting}[language=Python]
+# Dong 20
+SAVE_MODEL = False           # <- mac dinh: KHONG save gi ca
+
+# Dong 141-144
+if SAVE_MODEL:
+    model.save(model_dir)    # <- save DAY (truoc khi train!)
+
+model.learn(total_timesteps=config.n_steps_total, progress_bar=True)  # <- train DAY
+\end{lstlisting}
+
+\textbf{Đây là hai lỗi độc lập trong cùng một đoạn:}
+
+\textbf{Lỗi 1 --- SAVE\_MODEL = False:}
+Ai chạy \texttt{python run.py train\_ppo} sẽ train 5M steps xong và không có file model nào được lưu. Kết quả training biến mất hoàn toàn.
+
+\textbf{Lỗi 2 --- Save trước learn():}
+Kể cả khi đổi thành \texttt{SAVE\_MODEL = True}, lệnh \texttt{model.save()} ở dòng 142 được gọi \textbf{trước} \texttt{model.learn()} ở dòng 144. Model được save tại thời điểm này là model chưa qua bất kỳ bước training nào --- chỉ có random weight initialization.
+
+\textbf{Code đúng phải là:}
+
+\begin{lstlisting}[language=Python]
+SAVE_MODEL = True            # bat luu model
+
+model.learn(total_timesteps=config.n_steps_total, progress_bar=True)
+
+if SAVE_MODEL:
+    model.save(model_dir)    # save SAU KHI train xong
+\end{lstlisting}
+
+\textbf{Hệ quả với việc tái tạo:}
+Bất kỳ ai cố tái tạo paper bằng cách chạy script gốc đều sẽ không lưu được model. Đây là lý do quan trọng nhất khiến việc reproduce trở nên khó khăn về mặt thực tế.
+
+\subsection{Bug cấu trúc: Default config phá vỡ 2-phase training}
+
+\textbf{File:} \texttt{src/ho\_optim\_drl/config.py}, dòng 60
+
+\begin{lstlisting}[language=Python]
+@dataclass
+class Config:
+    ...
+    terminate_on_pp: bool = True   # <- default = True (Phase 2 config!)
+    terminate_on_rlf: bool = True
+\end{lstlisting}
+
+\textbf{Vấn đề:}
+
+Paper mô tả 2-phase training:
+\begin{itemize}
+  \item Phase 1: \texttt{terminate\_on\_pp = False} (agent học HO tự do, không bị terminate vì PP)
+  \item Phase 2: \texttt{terminate\_on\_pp = True} (agent học tránh PP)
+\end{itemize}
+
+Nhưng default config có \texttt{terminate\_on\_pp = True} --- là Phase 2 config.
+
+Khi chạy script gốc \texttt{train\_ppo.py}, không có chỗ nào thay đổi \texttt{terminate\_on\_pp}. Toàn bộ 5M steps đều chạy với Phase 2 config:
+
+\begin{lstlisting}[language=Python]
+def train_ppo(root_path: str):
+    config = Config()          # terminate_on_pp=True ngay tu dau
+    ...
+    env = HandoverEnvPPO(config, ...)
+    model.learn(total_timesteps=config.n_steps_total, ...)
+    # Khong co Phase 1. Khong co Phase 2. Chi mot phase duy nhat voi Phase 2 config.
+\end{lstlisting}
+
+\textbf{Ý nghĩa:} Script gốc không implement 2-phase training như paper mô tả. Paper mô tả 2-phase nhưng code gốc chỉ có 1-phase với Phase 2 parameter. Đây là \textbf{sự không nhất quán giữa paper và code}.
+
+\subsection{Bug nhỏ: n310 và n311 là class variable, không phải dataclass field}
+
+\textbf{File:} \texttt{src/ho\_optim\_drl/config.py}, dòng 37--38
+
+\begin{lstlisting}[language=Python]
+@dataclass
+class Config:
+    ...
+    t_t310: int = 1_000 // delta_t_ms  # dataclass field (co type annotation)
+    n310 = 10                           # class variable (khong co type annotation)
+    n311 = 3                            # class variable (khong co type annotation)
+\end{lstlisting}
+
+Trong Python, \texttt{@dataclass} chỉ nhận các biến \textbf{có type annotation} làm instance fields. Biến không có type annotation trở thành \textbf{class variable} --- tồn tại ở cấp class, không phải ở cấp instance.
+
+\textbf{So sánh:}
+
+\begin{lstlisting}[language=Python]
+config1 = Config()
+config2 = Config()
+
+config1.t_t310 = 200   # thay doi chi instance config1 -> OK
+config2.t_t310         # van = 100 -> OK
+
+config1.n310 = 5       # tao instance attribute o config1 -> OK nhung khong nhat quan
+Config.n310            # van = 10 (class variable khong doi)
+config2.n310           # = 10 (doc tu class variable)
+\end{lstlisting}
+
+\textbf{Hậu quả thực tế:}
+\begin{itemize}
+  \item \texttt{config.update(\{'n310': X\})} hoạt động được (vì \texttt{hasattr} tìm thấy qua class) nhưng tạo ra instance attribute shadow class variable --- không nhất quán
+  \item Hai instance \texttt{Config} có thể có \texttt{n310} khác nhau theo cách không rõ ràng
+  \item Khi copy config hoặc serialize, \texttt{n310} và \texttt{n311} có thể bị bỏ sót vì không nằm trong \texttt{\_\_dataclass\_fields\_\_}
+\end{itemize}
+
+\subsection{Vấn đề tiềm ẩn: l3\_filter\_w phụ thuộc l3\_k nhưng không update khi l3\_k thay đổi}
+
+\textbf{File:} \texttt{src/ho\_optim\_drl/config.py}, dòng 22--23
+
+\begin{lstlisting}[language=Python]
+l3_k: int = 16
+l3_filter_w: float = 1 / (2 ** (l3_k / 4))    # = 1/16 = 0.0625
+\end{lstlisting}
+
+Trong Python dataclass, default value của một field được tính \textbf{một lần duy nhất tại class definition time}, không phải tại instance creation time. Biểu thức \texttt{1 / (2 ** (l3\_k / 4))} được tính với \texttt{l3\_k = 16} $\to$ \texttt{l3\_filter\_w = 0.0625} cố định.
+
+\begin{lstlisting}[language=Python]
+config = Config()
+config.l3_k = 8         # doi l3_k
+config.l3_filter_w      # van = 0.0625, khong tu update!
+\end{lstlisting}
+
+\textbf{Tác động trong thực nghiệm này:} Không ảnh hưởng vì chúng ta không thay đổi \texttt{l3\_k}. Nhưng đây là hidden coupling cần biết.
+
+\subsection{Tóm tắt các vấn đề source code theo mức độ nghiêm trọng}
+
+\begin{longtable}{@{}clp{2.5cm}cp{4cm}@{}}
+\toprule
+\textbf{\#} & \textbf{Vấn đề} & \textbf{File : Dòng} & \textbf{Mức độ} & \textbf{Ảnh hưởng thực tế} \\
+\midrule
+\endhead
+1 & BS0 không nhận reward (\texttt{> 0} thay vì \texttt{>= 0}) & \texttt{ho\_env\_ppo.py:359} & Cao & Bias training, khuyến khích rời BS0 sớm \\
+2 & \texttt{SAVE\_MODEL=False} --- không lưu model & \texttt{train\_ppo.py:20} & Cao & Mất kết quả training hoàn toàn \\
+3 & Model save TRƯỚC \texttt{model.learn()} & \texttt{train\_ppo.py:141--144} & Cao & File lưu là random model chưa train \\
+4 & Default \texttt{terminate\_on\_pp=True} --- không có Phase 1 & \texttt{config.py:60} & Vừa & Script gốc không làm 2-phase như paper \\
+5 & \texttt{n310}, \texttt{n311} là class variable & \texttt{config.py:37--38} & Thấp & Inconsistency, không gây crash \\
+6 & Training chỉ dùng dataset 0 & \texttt{ho\_env\_ppo.py} + \texttt{train\_ppo.py} & Vừa & Thiếu diversity, overfitting tiềm ẩn \\
+7 & \texttt{l3\_filter\_w} không update theo \texttt{l3\_k} & \texttt{config.py:22--23} & Thấp & Không ảnh hưởng nếu không đổi l3\_k \\
+\bottomrule
+\end{longtable}
+
+\section{Tại sao không thể tái tạo kết quả từ scratch --- Phân tích toàn diện}
+
+Đây là phân tích có cấu trúc về \textbf{tại sao} tất cả 11 lần thử đều thất bại. Có ba nhóm nguyên nhân độc lập, mỗi nhóm một mình đã đủ để gây thất bại.
+
+\subsection{Nguyên nhân nhóm 1 --- Vấn đề thuật toán (Algorithm-Level)}
+
+\subsubsection{Credit Assignment Problem --- nguyên nhân gốc rễ}
+
+Đây là vấn đề lý thuyết cơ bản nhất. Với thiết kế hiện tại:
+
+\textbf{Bước 1: Random policy $\to$ HO không xảy ra}
+
+\[
+P(\text{HO trigger}) = P(\text{chọn cùng 1 BS trong } t_{ho\_prep} \text{ bước liên tiếp})
+\]
+\[
+= \left(\frac{1}{N}\right)^{t_{ho\_prep} - 1} = \left(\frac{1}{5}\right)^4 = 0.0016 = 0.16\%
+\]
+
+Trong 2000 bước của 1 rollout buffer: kỳ vọng chỉ $2000 \times 0.0016 = 3.2$ HO triggers. Nhưng mỗi HO mất thêm 9 bước để hoàn thành (5 prep + 4 exec), và với uniform policy, target BS thay đổi trong lúc đó $\to$ HO fail $\to$ RLF $\to$ episode kết thúc sớm.
+
+\textbf{Bước 2: HO không xảy ra $\to$ Reward không phụ thuộc action}
+
+Khi pcell không thay đổi (không HO), reward tại mỗi bước chỉ phụ thuộc vào SINR của pcell hiện tại:
+\[
+r_t = s_{SINR}[\text{pcell}] \approx 0.5 \quad \text{(không đổi)}
+\]
+
+Action $a_t$ không ảnh hưởng đến pcell $\to$ không ảnh hưởng đến reward.
+
+\textbf{Bước 3: Reward không phụ thuộc action $\to$ Advantage $\approx 0$}
+
+Advantage function:
+\[
+A(s_t, a_t) = Q(s_t, a_t) - V(s_t) = \mathbb{E}[r_t + \gamma r_{t+1} + \ldots \mid s_t, a_t] - V(s_t)
+\]
+
+Khi $r$ không phụ thuộc $a$: $Q(s, a) = V(s)$ $\to$ $A(s, a) \approx 0$ với mọi $(s, a)$.
+
+\textbf{Bước 4: Advantage $\approx 0$ $\to$ Policy gradient $\approx 0$ $\to$ Policy không update}
+
+PPO policy loss:
+\[
+L^{CLIP}(\theta) = \mathbb{E}_t \left[ \min\left( r_t(\theta) \hat{A}_t,\ \text{clip}(r_t(\theta), 1-\epsilon, 1+\epsilon) \hat{A}_t \right) \right]
+\]
+
+Khi $\hat{A}_t \approx 0$: $L^{CLIP} \approx 0$ $\to$ $\nabla_\theta L^{CLIP} \approx 0$ $\to$ policy weight không thay đổi.
+
+\textbf{Kết quả:} Policy bị kẹt tại điểm khởi tạo (gần uniform) vĩnh viễn, không phụ thuộc số steps.
+
+\textbf{Xác nhận thực nghiệm (300K steps):}
+
+\begin{longtable}{@{}cccl@{}}
+\toprule
+\textbf{ent\_coef} & \textbf{Entropy} & \textbf{\% of max uniform} & \textbf{Verdict} \\
+\midrule
+\endhead
+0.1 & 1.6094 & 100.0\% & Hoàn toàn uniform \\
+0.01 & 1.6093 & 99.99\% & Gần như uniform \\
+0.001 & 1.6084 & 99.9\% & Vẫn uniform \\
+\bottomrule
+\end{longtable}
+
+Entropy coefficient không giúp được vì vấn đề nằm ở policy loss gradient, không phải entropy regularization.
+
+\subsubsection{Thách thức dự đoán tương lai (9-step look-ahead)}
+
+Ngay cả khi agent vượt qua được credit assignment problem và bắt đầu học HO, nó vẫn đối mặt với một thách thức cấu trúc khác.
+
+Khi agent commit HO tại bước $t$, kết quả (UE kết nối BS mới) chỉ biết tại bước $t+9$:
+\[
+t_{HO\_complete} = t_{commit} + t_{ho\_prep} + t_{ho\_exec} = t + 5 + 4 = t + 9
+\]
+
+Trong 90 ms đó, kênh truyền thay đổi. Để HO thành công, agent cần chọn BS sao cho \textbf{tại thời điểm $t+9$}, BS đó vẫn có SINR tốt:
+\[
+a_t^* = \arg\max_i \text{SINR}_i(t+9)
+\]
+
+Nhưng observation tại $t$ chỉ có:
+\[
+s_t = [s_{BS}, s_{SINR}(t), s_{PP}]
+\]
+
+Không có thông tin về $\text{SINR}(t+1), \ldots, \text{SINR}(t+9)$. MLP không có memory hay look-ahead --- nó chỉ ánh xạ $s_t \to a_t$ dựa trên $t$ hiện tại.
+
+\textbf{Hệ quả quan sát được (V4 experiments):}
+\begin{itemize}
+  \item bc\_paper: RLF = 250--490\% $\to$ agent commit HO nhưng target BS thay đổi sau 9 bước $\to$ HOF $\to$ RLF liên tục
+  \item Không có variant nào thoát khỏi pattern này trừ khi "never HO"
+\end{itemize}
+
+\subsection{Nguyên nhân nhóm 2 --- Vấn đề trong source code gốc (Code-Level)}
+
+\subsubsection{Script gốc không implement 2-phase training}
+
+Như đã phân tích ở \S9.3:
+\begin{itemize}
+  \item Paper mô tả Phase 1 với \texttt{terminate\_on\_pp=False}
+  \item Default config có \texttt{terminate\_on\_pp=True}
+  \item \texttt{train\_ppo.py} không thay đổi config $\to$ toàn bộ training là Phase 2
+\end{itemize}
+
+Điều này có nghĩa: \textbf{bất kỳ ai chạy \texttt{python run.py train\_ppo} đều không đang tái tạo paper} dù họ không biết điều này.
+
+\subsubsection{Model không được lưu}
+
+Ngay cả khi training hội tụ, \texttt{SAVE\_MODEL=False} đảm bảo không có file model nào được tạo. Script gốc \textbf{cố tình} không lưu model (có thể vì paper dùng WandB sweep để lưu).
+
+\subsubsection{Reward bias BS0}
+
+Bias reward đối với BS0 tạo ra một "lực kéo" không nhất quán: agent có thể học policy phụ thuộc vào việc có hay không có BS0 trong episode, thay vì học policy thuần túy dựa trên SINR.
+
+\subsection{Nguyên nhân nhóm 3 --- Thiếu thông tin từ paper (Documentation-Level)}
+
+Đây là các thông tin \textbf{không được document} trong paper hoặc repo, khiến việc tái tạo về nguyên tắc là không đầy đủ.
+
+\subsubsection{Không có random seed}
+
+Paper không document seed nào được dùng để train pre-trained model. Kết quả thực nghiệm multi-seed (5 seeds $\times$ 2M steps, \S4.4) chứng minh rằng vấn đề không phải seed-sensitive với 5 seeds đã thử. Nhưng không thể thử tất cả $2^{32}$ seeds.
+
+\subsubsection{Không rõ số timesteps thực tế}
+
+Paper ghi \texttt{n\_steps\_total = 5,000,000} trong config. Nhưng:
+\begin{itemize}
+  \item Không biết paper có train nhiều lần và chọn model tốt nhất không
+  \item Không biết có early stopping không
+  \item Không biết có fine-tuning sau không
+\end{itemize}
+
+\subsubsection{WandB Sweep --- khả năng dùng hyperparameter search}
+
+Trong \texttt{train\_ppo.py}:
+\begin{lstlisting}[language=Python]
+def get_sweep_config():
+    return {
+        "name": SWEEP_NAME,
+        "method": "bayes",          # Bayesian optimization sweep!
+        "metric": {"goal": "maximize", "name": "reward_sum_avg"},
+        "parameters": {
+            "ent_coef": {"values": [0.001, 0.01, 0.1]},
+            "rew_const": {"values": [0.8, 0.9, 1.0]},
+        },
+    }
+\end{lstlisting}
+
+Code đã setup sẵn \textbf{WandB Bayesian sweep} cho \texttt{ent\_coef} và \texttt{rew\_const}. Điều này gợi ý rằng paper model có thể được train qua \textbf{hyperparameter search}, không phải single run với default params.
+
+Nếu paper chạy 9 combinations ($3$ ent\_coef $\times$ $3$ rew\_const) và chọn model tốt nhất, xác suất ít nhất 1 run hội tụ tăng lên đáng kể. Đây là \textbf{undocumented training procedure} quan trọng nhất.
+
+\subsubsection{Không document dataset selection trong training}
+
+Như đã phân tích ở \S9.6, script gốc chỉ dùng dataset 0. Nhưng paper mô tả "training speeds: 30, 50 km/h" ngụ ý dùng cả hai. Không rõ paper thực sự train trên bao nhiêu datasets và theo thứ tự nào.
+
+\subsection{Sơ đồ nhân quả tổng hợp}
+
+\begin{lstlisting}
+           TAI SAO KHONG TAI TAO DUOC -- TOAN CANH
+
+  NHOM 1: THUAT TOAN (khong the tranh voi thiet ke hien tai)
+  +------------------------------------------------------------+
+  |  Random init -> HO xac suat 0.16%                          |
+  |      -> Reward khong phu thuoc action                      |
+  |      -> Advantage ~ 0 -> Gradient ~ 0                       |
+  |      -> Policy stuck tai uniform mai mai                    |
+  |                                                              |
+  |  Neu vuot qua duoc: 9-step delay                            |
+  |      -> Can du doan SINR(t+9) tu SINR(t)                    |
+  |      -> MLP khong co memory -> HOF -> RLF=250-490%          |
+  +------------------------------------------------------------+
+
+  NHOM 2: CODE (gay ra boi bugs trong source goc)
+  +------------------------------------------------------------+
+  |  SAVE_MODEL=False -> khong luu model du train thanh cong    |
+  |  Save truoc learn() -> luu model chua train                 |
+  |  Default terminate_on_pp=True -> khong co Phase 1           |
+  |  BS0 reward bug -> bias training                            |
+  +------------------------------------------------------------+
+
+  NHOM 3: DOCUMENTATION (thieu thong tin tu paper)
+  +------------------------------------------------------------+
+  |  Khong co seed -> khong the reproduce exact run              |
+  |  WandB sweep khong duoc document -> paper co the             |
+  |      da chay 9+ combinations va chon best                    |
+  |  Dataset selection khong ro                                  |
+  |  So timesteps thuc te khong ro                               |
+  +------------------------------------------------------------+
+
+  KET LUAN: Ca 3 nhom cung tac dong -> reproduction khong
+  kha thi voi thong tin hien co, ngay ca ve ly thuyet.
+\end{lstlisting}
+
+\subsection{Trả lời câu hỏi: "Tại sao pre-trained model hoạt động tốt?"}
+
+Pre-trained model đạt $\Gamma_R = 99.8\%$ với policy hoàn toàn deterministic (H=0). Đây là trạng thái hội tụ hoàn toàn. Dựa trên phân tích code, có một số giả thuyết được sắp xếp theo xác suất:
+
+\textbf{Giả thuyết 1 (Xác suất cao): WandB sweep chọn lucky combination}
+
+Code đã setup sẵn Bayesian sweep cho 9 combinations. Nếu paper chạy sweep và chọn model tốt nhất:
+\begin{itemize}
+  \item Mỗi combination có xác suất nhỏ hội tụ
+  \item 9 combinations cho xác suất tổng hợp cao hơn đáng kể
+  \item Đây là cách thông thường để làm paper trong ML
+\end{itemize}
+
+\textbf{Giả thuyết 2 (Xác suất trung bình): Số steps nhiều hơn 5M}
+
+5M steps chỉ tạo ra \textasciitilde 860 HO completions. Nếu paper train 50M steps, số HOs tăng lên \textasciitilde 8600, có thể đủ để gradient signal tích lũy. Config có \texttt{n\_steps\_total = 5e6} nhưng đây là default, không phải giá trị thực tế của paper run.
+
+\textbf{Giả thuyết 3 (Xác suất thấp): Lucky seed với specific trajectory}
+
+Một số trajectories trong dataset có "cell edge" scenarios rõ ràng hơn --- UE đi qua vùng biên BS và SINR drop mạnh. Ở những đoạn đó, RLF penalty buộc agent học cách commit HO. Với seed may mắn tạo ra initialization bias về một BS, positive feedback loop có thể bắt đầu.
+
+\textbf{Giả thuyết 4 (Xác suất rất thấp): Paper chỉ train 1 lần và may mắn}
+
+Không thể loại trừ khả năng paper chạy 1 lần với default seed=0, ngẫu nhiên hội tụ, và không kiểm tra reproducibility. Đây là vấn đề phổ biến trong ML papers.
+
+\subsection{Điều kiện cần thiết để tái tạo được}
+
+Để tái tạo $\Gamma_R \geq 99\%$ từ scratch, cần giải quyết tất cả ba nhóm vấn đề:
+
+\textbf{Nhóm 1 (Thuật toán) --- cần ít nhất 1 trong:}
+\begin{itemize}
+  \item[$\square$] Thêm SINR look-ahead vào observation: $s_t^{new}$ bao gồm $\text{SINR}(t+1), \ldots, \text{SINR}(t+9)$
+  \item[$\square$] Reward shaping mạnh: $r_{shaped} = \alpha \cdot \text{SINR}_{action}(t+9)$
+  \item[$\square$] Curriculum với t\_ho\_prep: $1\to2\to3\to4\to5$, đủ steps mỗi phase để knowledge transfer
+  \item[$\square$] Dùng LSTM/GRU thay MLP để agent học temporal pattern tự nhiên
+\end{itemize}
+
+\textbf{Nhóm 2 (Code) --- cần fix tất cả:}
+\begin{itemize}
+  \item[$\blacksquare$] Fix \texttt{> 0} thành \texttt{>= 0} ở reward function (đã biết)
+  \item[$\blacksquare$] Đặt \texttt{model.save()} sau \texttt{model.learn()} (đã biết)
+  \item[$\blacksquare$] Implement Phase 1 với \texttt{terminate\_on\_pp=False} (đã làm trong các scripts tùy chỉnh)
+\end{itemize}
+
+\textbf{Nhóm 3 (Documentation) --- không thể fix hoàn toàn:}
+\begin{itemize}
+  \item[$\square$] Cần author của paper cung cấp seed, số steps thực tế, và WandB sweep history
+  \item[$\square$] Hoặc cần brute-force thử nhiều seeds/hyperparameters hơn
+\end{itemize}
+
+\bigskip
+\textit{Báo cáo này tổng hợp kết quả từ 11 lần thử nghiệm trong khoảng thời gian 2026-06-18 đến 2026-07-01.}\\
+\textit{Kết luận chính: Pre-trained model của paper có thể evaluate được (khớp $<$ 0.02\%), nhưng không thể tái hiện từ scratch trong 5M--10M steps do Credit Assignment Problem cố hữu của bài toán HO với t\_ho\_prep=5.}
+
+\end{document}
