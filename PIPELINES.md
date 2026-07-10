@@ -171,4 +171,3 @@ flowchart TD
 
 ---
 
-*Xem `TAI_LIEU_ON_TAP.md` để có phần giải thích chi tiết bằng chữ đi kèm mỗi sơ đồ.*
