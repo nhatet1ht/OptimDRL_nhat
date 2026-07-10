@@ -1,4 +1,4 @@
-# Tài liệu ôn tập: DRL cho tối ưu Handover trong 5G NR
+# DRL cho tối ưu Handover trong 5G NR
 
 > Mục đích: tài liệu **một file duy nhất** để đọc từ đầu đến cuối, hiểu tường tận từ lý
 > thuyết → bài toán → code → cách test → toàn bộ hành trình 11 lần thử nghiệm và **vì sao**
