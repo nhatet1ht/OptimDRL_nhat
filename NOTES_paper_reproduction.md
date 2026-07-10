@@ -267,10 +267,3 @@ PPO cải thiện đáng kể ở vận tốc cao (>50 km/h) vì timing HO linh 
 SINR sau HO (dashed line trong Fig. 5) của PPO cao hơn 3GPP → HO sang BS tốt hơn.
 
 ---
-
-## 12. Lưu ý GPU RTX 3060 Ti
-
-- Code tự detect CUDA: `device=torch.device("cuda" if torch.cuda.is_available() else "cpu")`
-- 5M timesteps với MLP nhỏ [64,128,64] → training rất nhanh (~30–60 phút)
-- VRAM 8GB là quá đủ cho model size này
-- Có thể tăng `n_steps_per_update` hoặc `batch_size` nếu muốn tận dụng GPU hơn
